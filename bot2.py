@@ -347,9 +347,6 @@ def execute_plan(plan: QuotePlan, state: BotState, cfg: BotConfig) -> None:
 def step(state: BotState, cfg: BotConfig) -> Tuple[BotState, Optional[QuotePlan], Optional[float]]:
     if get_status() not in (None, 'ACTIVE', 'RUNNING'):
         return state, None, None
-    # Refresh posterior anchor from file each iteration.
-    # - Updates global POSTERIOR used throughout pricing.
-    # - Keeps the module-level fair EMA aligned when POSTERIOR changes.
     global POSTERIOR, _FAIR_EMA
     new_post = _read_posterior_from_file()
     if new_post != POSTERIOR:
