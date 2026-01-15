@@ -191,11 +191,6 @@ def compute_desired_quotes(fair: float, snap: Snapshot, cfg: BotConfig) -> Tuple
     bid_px = round_tick(bid_px)
     ask_px = round_tick(ask_px)
 
-    if best_ask is not None:
-        bid_px = min(bid_px, round_tick(best_ask - TICK))
-    if best_bid is not None:
-        ask_px = max(ask_px, round_tick(best_bid + TICK))
-
     util = compute_inventory_skew(snap.position, cfg)
     bid_size = int(round(cfg.base_size * max(0.0, min(1.0, 1.0 - util))))
     ask_size = int(round(cfg.base_size * max(0.0, min(1.0, 1.0 + util))))
