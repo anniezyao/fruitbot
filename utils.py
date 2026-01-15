@@ -2,7 +2,8 @@ import requests
 from config import *
 
 s = requests.Session()
-
+s.headers.update(API_KEY)
+print(s.get(API_URL + 'case'))
 
 def _get(path, params=None):
     resp = s.get(API_URL + path, params=params)

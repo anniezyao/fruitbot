@@ -343,3 +343,6 @@ def run_n_steps(n: int, cfg: Optional[BotConfig] = None, state: Optional[BotStat
         state, _, _ = step(state, cfg)
         time.sleep(cfg.loop_sleep_s)
     return state
+
+run_forever()
+
