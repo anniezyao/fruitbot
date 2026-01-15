@@ -97,9 +97,9 @@ def calc_fair(fit):
 class BotConfig:
     ticker: str = 'APPL'
     loop_sleep_s: float = 0.25
-    base_size: int = 10
-    min_size: int = 1
-    max_pos: int = 100
+    base_size: int = 500
+    min_size: int = 100
+    max_pos: int = 10000
     min_spread_ticks: int = 2
     edge_ticks: int = 1
     skew_ticks: int = 6

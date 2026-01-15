@@ -30,7 +30,7 @@ FIT_MAX = 0.85
 FIT_EMA_LAMBDA = 0.05
 FIT_VOL_SAT = 50.0
 FIT_NOISE_K = 0.05
-TRADE_WINDOW_TICKS = 25
+TRADE_WINDOW_TICKS = 10
 FAIR_EMA_LAMBDA = 0.20
 FAIR_CLAMP_TICKS = 50  # clamp fair within ±50 ticks of book-mid
 
@@ -106,39 +106,7 @@ def calc_fair(fit):
 
     sigma = 1.4826 * mad
     shrink = (K * K) / (K * K + sigma * sigma + EPS)
-    trade_signal = shrink * vwap + (1.0 - shrink) * median
-
-    # Use top-of-book microprice as a stabilizer against noisy tape
-    book = get_book('APPL', get_tick()) or {}
-    bids = book.get('bids') or []
-    asks = book.get('asks') or book.get('ask') or []
-    if bids and asks and isinstance(bids[0], dict) and isinstance(asks[0], dict):
-        bb_px = float(bids[0].get('price', bids[0].get('px')))
-        ba_px = float(asks[0].get('price', asks[0].get('px')))
-        bb_sz = float(bids[0].get('quantity', bids[0].get('qty', 0)) or 0)
-        ba_sz = float(asks[0].get('quantity', asks[0].get('qty', 0)) or 0)
-        if bb_sz > 0 and ba_sz > 0 and ba_px >= bb_px:
-            micro = (bb_px * ba_sz + ba_px * bb_sz) / (bb_sz + ba_sz)
-            mid = 0.5 * (bb_px + ba_px)
-        else:
-            micro = None
-            mid = None
-    else:
-        micro = None
-        mid = None
-
-    base_signal = 0.70 * trade_signal + 0.30 * (micro if micro is not None else trade_signal)
-
-    # EMA smooth the signal so single-tick spikes don't whip the bot
-    global _FAIR_EMA
-    _FAIR_EMA = (1.0 - FAIR_EMA_LAMBDA) * _FAIR_EMA + FAIR_EMA_LAMBDA * base_signal
-    market_signal = _FAIR_EMA
-
-    # Clamp to book-mid so outlier tape prints can't pull fair too far
-    if mid is not None:
-        lo = mid - FAIR_CLAMP_TICKS * TICK
-        hi = mid + FAIR_CLAMP_TICKS * TICK
-        market_signal = max(lo, min(hi, market_signal))
+    market_signal = shrink * vwap + (1.0 - shrink) * median
 
     vol_score = total_qty / (total_qty + FIT_VOL_SAT)
     noise_score = (FIT_NOISE_K * FIT_NOISE_K) / (FIT_NOISE_K * FIT_NOISE_K + sigma * sigma + EPS)
