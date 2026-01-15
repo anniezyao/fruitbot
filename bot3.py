@@ -48,9 +48,9 @@ def round_tick(p: float) -> float:
 class BotConfig:
     ticker: str = TICKER
     loop_sleep_s: float = 0.25
-    base_size: int = 200
-    min_size: int = 50
-    max_pos: int = 10000
+    base_size: int = 500
+    min_size: int = 100
+    max_pos: int = 200000
     min_spread_ticks: int = 2
     edge_ticks: int = 10  # Increased to 10 to further avoid pennying
     skew_ticks: int = 6  # Added for inventory skew like Bot2
