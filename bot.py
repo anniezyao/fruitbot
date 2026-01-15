@@ -89,6 +89,7 @@ def calc_fair(fit):
     fit = max(FIT_MIN, min(FIT_MAX, fit))
 
     fair = (1 - fit) * POSTERIOR + fit * market_signal
+    print(fit, fair)
     return fit, fair
 
 

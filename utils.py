@@ -84,11 +84,9 @@ def send_order(ticker, side, price, size, order_type='LIMIT'):
             **({} if price is None else {'price': price}),
         },
     )
-    print('Sent', out.get('order_id')) 
     return out.get('order_id')
 
 def cancel_order(order_id):
-    print('Canceled', order_id)
     return _delete('orders/' + str(order_id))
 
 def cancel_all_orders(ticker=None):
