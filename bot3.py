@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
+from config import *
 
 from utils import (
     cancel_order,
@@ -19,27 +20,24 @@ from utils import (
 
 TICK = 0.01
 POSTERIOR_DEFAULT = 500.0
+FAIR_CLAMP_TICKS = 50  # Clamp fair within ±50 ticks of book-mid
 
-APPLE_THEO_PATH = "apple_theo"
-OUR_TRADER_ID = "5B"
+THEO_PATH = "theo"
 
 
-def _read_fair_from_file(path: str = APPLE_THEO_PATH) -> float:
+def _read_fair_from_file(path: str = THEO_PATH) -> float:
     """Read fair value from a plain-text file.
 
-    The file should contain a single number (int/float). If missing or invalid,
-    fall back to POSTERIOR_DEFAULT.
+    Assumes theo is always correct; no fallback needed.
     """
     try:
         s = Path(path).read_text().strip()
-        if not s:
-            return POSTERIOR_DEFAULT
         v = float(s)
         if math.isfinite(v):
             return v
-    except Exception:
-        pass
-    return POSTERIOR_DEFAULT
+    except Exception as e:
+        print(f"Error reading theo file: {e}")
+    return POSTERIOR_DEFAULT  # Fallback if error, but assume correct
 
 
 def round_tick(p: float) -> float:
@@ -48,13 +46,14 @@ def round_tick(p: float) -> float:
 
 @dataclass
 class BotConfig:
-    ticker: str = 'APPL'
+    ticker: str = TICKER
     loop_sleep_s: float = 0.25
     base_size: int = 200
     min_size: int = 50
     max_pos: int = 10000
     min_spread_ticks: int = 2
-    edge_ticks: int = 1
+    edge_ticks: int = 10  # Increased to 10 to further avoid pennying
+    skew_ticks: int = 6  # Added for inventory skew like Bot2
     cancel_threshold_ticks: int = 1
     requote_cooldown_ms: int = 400
     max_orders_per_side: int = 1
@@ -149,50 +148,81 @@ def _normalize_open_orders(open_orders: List[Dict[str, Any]]) -> Dict[str, List[
 
 def _is_our_order(order: OrderRef) -> bool:
     """Check if the given order belongs to our trader to avoid self-trading."""
-    return order.trader_id == OUR_TRADER_ID
+    return order.trader_id == TRADER_ID
 
 
 def _ticks_diff(a: float, b: float) -> int:
     return int(round(abs(a - b) / TICK))
 
 
-def make_plan(state: BotState, fair: float, snap: Snapshot, cfg: BotConfig) -> QuotePlan:
-    """Create a quote plan based on the current bot state, fair value, market snapshot, and config.
-    
-    This function determines desired bid and ask quotes by either making a market around the fair value
-    if the spread is wide enough, or hitting/lifting the best bid/ask if the fair value is outside the spread.
-    It then plans cancellations, placements, and replacements for orders on both sides, respecting cooldowns
-    and thresholds to avoid excessive quoting."""
+def compute_inventory_skew(position: int, cfg: BotConfig) -> float:
+    if cfg.max_pos <= 0:
+        return 0.0
+    x = position / float(cfg.max_pos)
+    return max(-1.0, min(1.0, x))
+
+
+def compute_base_halfspread_ticks(best_bid: Optional[float], best_ask: Optional[float], cfg: BotConfig) -> int:
+    if best_bid is None or best_ask is None:
+        return max(cfg.min_spread_ticks // 2, 1)
+    spread = best_ask - best_bid
+    spread_ticks = int(round(spread / TICK))
+    half = max(cfg.min_spread_ticks // 2, max(1, spread_ticks // 2))
+    return max(half, 1)
+
+
+def compute_desired_quotes(fair: float, snap: Snapshot, cfg: BotConfig) -> Tuple[Optional[Quote], Optional[Quote]]:
     best_bid, best_ask = _best_prices(snap.book)
+    # Clamp fair within ±FAIR_CLAMP_TICKS of book mid
+    if best_bid is not None and best_ask is not None:
+        mid = (best_bid + best_ask) / 2
+        clamp_min = mid - FAIR_CLAMP_TICKS * TICK
+        clamp_max = mid + FAIR_CLAMP_TICKS * TICK
+        fair = max(clamp_min, min(clamp_max, fair))
+    
+    half = compute_base_halfspread_ticks(best_bid, best_ask, cfg)
+    raw_bid = fair - (half + cfg.edge_ticks) * TICK
+    raw_ask = fair + (half + cfg.edge_ticks) * TICK
+
+    skew = compute_inventory_skew(snap.position, cfg)
+    bid_px = raw_bid - skew * cfg.skew_ticks * TICK
+    ask_px = raw_ask - skew * cfg.skew_ticks * TICK
+
+    bid_px = round_tick(bid_px)
+    ask_px = round_tick(ask_px)
+
+    if best_ask is not None:
+        bid_px = min(bid_px, round_tick(best_ask - TICK))
+    if best_bid is not None:
+        ask_px = max(ask_px, round_tick(best_bid + TICK))
+
+    util = compute_inventory_skew(snap.position, cfg)
+    bid_size = int(round(cfg.base_size * max(0.0, min(1.0, 1.0 - util))))
+    ask_size = int(round(cfg.base_size * max(0.0, min(1.0, 1.0 + util))))
+    bid_size = max(cfg.min_size, bid_size)
+    ask_size = max(cfg.min_size, ask_size)
+
+    desired_bid = Quote(price=bid_px, qty=bid_size)
+    desired_ask = Quote(price=ask_px, qty=ask_size)
+
+    if snap.position >= cfg.max_pos:
+        desired_bid = None
+    if snap.position <= -cfg.max_pos:
+        desired_ask = None
+
+    return desired_bid, desired_ask
+
+
+def make_plan(state: BotState, fair: float, snap: Snapshot, cfg: BotConfig) -> QuotePlan:
+    desired_bid, desired_ask = compute_desired_quotes(fair, snap, cfg)
     by_side = _normalize_open_orders(snap.open_orders)
     now_ms = _now_ms()
-    plan = QuotePlan(desired_bid=None, desired_ask=None)
-
-    # Determine if we should make market or hit/lift
-    spread_ticks = 0
-    if best_bid is not None and best_ask is not None:
-        spread_ticks = _ticks_diff(best_ask, best_bid)
-
-    if spread_ticks >= cfg.min_spread_ticks:
-        # Make market around fair
-        desired_bid = Quote(price=round_tick(fair - cfg.min_spread_ticks * TICK / 2), qty=cfg.base_size)
-        desired_ask = Quote(price=round_tick(fair + cfg.min_spread_ticks * TICK / 2), qty=cfg.base_size)
-    else:
-        # Hit/lift
-        desired_bid = None
-        desired_ask = None
-        if best_bid is not None and fair > best_bid:
-            desired_bid = Quote(price=best_bid, qty=cfg.base_size)
-        if best_ask is not None and fair < best_ask:
-            desired_ask = Quote(price=best_ask, qty=cfg.base_size)
-
-    plan.desired_bid = desired_bid
-    plan.desired_ask = desired_ask
+    plan = QuotePlan(desired_bid=desired_bid, desired_ask=desired_ask)
 
     # Handle each side
     def handle_side(side: str, desired: Optional[Quote]):
-        existing = [o for o in by_side.get(side, []) if not _is_our_order(o)][: cfg.max_orders_per_side]
-        extra = by_side.get(side, [])[len(existing):]
+        existing = by_side.get(side, [])[: cfg.max_orders_per_side]
+        extra = by_side.get(side, [])[cfg.max_orders_per_side :]
         for o in extra:
             plan.cancel_ids.append(o.order_id)
 
@@ -226,32 +256,32 @@ def execute_plan(plan: QuotePlan, state: BotState, cfg: BotConfig) -> None:
     """Execute the given quote plan by canceling specified orders, replacing existing ones, and placing new ones.
     
     This function attempts to cancel orders first, then for replacements, cancels the old order and places a new one,
-    and finally places new orders. It updates the bot state's last action timestamps on success and ignores exceptions."""
+    and finally places new orders. It updates the bot state's last action timestamps on success and logs exceptions."""
     now_ms = _now_ms()
 
     for oid in plan.cancel_ids:
         try:
             cancel_order(oid)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error canceling order {oid}: {e}")
 
     for oid, side, q in plan.replace:
         try:
             cancel_order(oid)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error canceling order {oid} for replace: {e}")
         try:
             send_order(cfg.ticker, side, q.price, q.qty)
             state.last_action_ms[side] = now_ms
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error placing order for replace: {e}")
 
     for side, q in plan.place:
         try:
             send_order(cfg.ticker, side, q.price, q.qty)
             state.last_action_ms[side] = now_ms
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error placing order: {e}")
 
 
 def step(state: BotState, cfg: BotConfig) -> Tuple[BotState, Optional[QuotePlan], Optional[float]]:
@@ -269,23 +299,14 @@ def step(state: BotState, cfg: BotConfig) -> Tuple[BotState, Optional[QuotePlan]
     return state, plan, fair
 
 
-def run_forever(cfg: Optional[BotConfig] = None, state: Optional[BotState] = None) -> None:
+def main(cfg: Optional[BotConfig] = None, state: Optional[BotState] = None) -> None:
     cfg = cfg or BotConfig()
     state = state or BotState()
     while True:
         try:
             state, _, _ = step(state, cfg)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error in main loop: {e}")
         time.sleep(cfg.loop_sleep_s)
 
-
-def run_n_steps(n: int, cfg: Optional[BotConfig] = None, state: Optional[BotState] = None) -> BotState:
-    cfg = cfg or BotConfig()
-    state = state or BotState()
-    for _ in range(int(n)):
-        state, _, _ = step(state, cfg)
-        time.sleep(cfg.loop_sleep_s)
-    return state
-
-run_forever()
+main()
