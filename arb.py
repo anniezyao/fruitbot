@@ -67,7 +67,12 @@ def compute_actions(snap: Snapshot, cfg: ArbConfig) -> List[Tuple[str, str, Opti
         bid, ask = _best_prices(books[ticker])
         prices[ticker] = {'bid': bid, 'ask': ask}
 
-    # FRUIT arbitrage: FRUIT should = APPL + ORNG
+    # Compute market-implied fairs
+    appl_mid = (prices['APPL']['bid'] + prices['APPL']['ask']) / 2 if prices['APPL']['bid'] and prices['APPL']['ask'] else None
+    orng_mid = (prices['ORNG']['bid'] + prices['ORNG']['ask']) / 2 if prices['ORNG']['bid'] and prices['ORNG']['ask'] else None
+    fruit_mid = (prices['FRUIT']['bid'] + prices['FRUIT']['ask']) / 2 if prices['FRUIT']['bid'] and prices['FRUIT']['ask'] else None
+
+    # FRUIT arbitrage: FRUIT should = APPL + ORNG (market-driven)
     fruit_bid = prices['FRUIT']['bid']
     fruit_ask = prices['FRUIT']['ask']
     appl_bid = prices['APPL']['bid']
@@ -107,75 +112,75 @@ def compute_actions(snap: Snapshot, cfg: ArbConfig) -> List[Tuple[str, str, Opti
             else:
                 print("Position limits prevent FRUIT arb actions")
 
-    # FCALL arbitrage: FCALL fair ~80, hedge 1 FCALL with 10 FRUIT
+    # FCALL arbitrage: Market-implied fair from FRUIT/APPL/ORNG mids
+    fcall_fair = 10 * max(0, (fruit_mid or (appl_mid or 0) + (orng_mid or 0)) - 1000) if fruit_mid or (appl_mid and orng_mid) else None
     fcall_bid = prices['FCALL']['bid']
     fcall_ask = prices['FCALL']['ask']
 
-    print(f"FCALL prices: bid={fcall_bid}, ask={fcall_ask}, fair={FCALL_FAIR}")
+    print(f"FCALL prices: bid={fcall_bid}, ask={fcall_ask}, market-implied fair={fcall_fair}")
 
-    if fcall_bid is not None and fcall_bid > FCALL_FAIR + THRESHOLD:
-        fcall_size = cfg.base_size
-        fruit_size = 10 * fcall_size
-        if positions['FCALL'] > -cfg.max_pos and positions['FRUIT'] > -cfg.max_pos and fruit_size <= cfg.max_pos:
-            print(f"Executing FCALL arb: Sell FCALL at {fcall_bid} and Buy FRUIT at {prices['FRUIT']['ask']}, fair {FCALL_FAIR}")
-            actions.append(('FCALL', 'SELL', fcall_bid, fcall_size))
-            actions.append(('FRUIT', 'BUY', prices['FRUIT']['ask'], fruit_size))  # Hedge by buying FRUIT
+    if fcall_fair is not None:
+        if fcall_bid is not None and fcall_bid > fcall_fair + THRESHOLD:
+            fcall_size = cfg.base_size
+            fruit_size = 10 * fcall_size
+            if positions['FCALL'] > -cfg.max_pos and positions['FRUIT'] > -cfg.max_pos and fruit_size <= cfg.max_pos:
+                print(f"Executing FCALL arb: Sell FCALL at {fcall_bid} and Buy FRUIT at {prices['FRUIT']['ask']}, fair {fcall_fair}")
+                actions.append(('FCALL', 'SELL', fcall_bid, fcall_size))
+                actions.append(('FRUIT', 'BUY', prices['FRUIT']['ask'], fruit_size))  # Hedge by buying FRUIT
 
-    if fcall_ask is not None and fcall_ask < FCALL_FAIR - THRESHOLD:
-        fcall_size = cfg.base_size
-        fruit_size = 10 * fcall_size
-        if positions['FCALL'] < cfg.max_pos and positions['FRUIT'] < cfg.max_pos and fruit_size <= cfg.max_pos:
-            print(f"Executing FCALL arb: Buy FCALL at {fcall_ask} and Sell FRUIT at {prices['FRUIT']['bid']}, fair {FCALL_FAIR}")
-            actions.append(('FCALL', 'BUY', fcall_ask, fcall_size))
-            actions.append(('FRUIT', 'SELL', prices['FRUIT']['bid'], fruit_size))  # Hedge by selling FRUIT
+        if fcall_ask is not None and fcall_ask < fcall_fair - THRESHOLD:
+            fcall_size = cfg.base_size
+            fruit_size = 10 * fcall_size
+            if positions['FCALL'] < cfg.max_pos and positions['FRUIT'] < cfg.max_pos and fruit_size <= cfg.max_pos:
+                print(f"Executing FCALL arb: Buy FCALL at {fcall_ask} and Sell FRUIT at {prices['FRUIT']['bid']}, fair {fcall_fair}")
+                actions.append(('FCALL', 'BUY', fcall_ask, fcall_size))
+                actions.append(('FRUIT', 'SELL', prices['FRUIT']['bid'], fruit_size))  # Hedge by selling FRUIT
 
-    # Statistical arbitrage on APPL and ORNG (limit orders)
-    appl_mid = (prices['APPL']['bid'] + prices['APPL']['ask']) / 2 if prices['APPL']['bid'] and prices['APPL']['ask'] else MEAN_FAIR
-    orng_mid = (prices['ORNG']['bid'] + prices['ORNG']['ask']) / 2 if prices['ORNG']['bid'] and prices['ORNG']['ask'] else MEAN_FAIR
+    # Statistical arbitrage on APPL and ORNG (market-driven, no fallback to MEAN_FAIR)
+    if appl_mid is not None and orng_mid is not None:
+        fair_orng = appl_mid  # Simplified, or use correlation if mids available
+        fair_appl = orng_mid
 
-    fair_orng = MEAN_FAIR + CORR * (appl_mid - MEAN_FAIR)
-    fair_appl = MEAN_FAIR + CORR * (orng_mid - MEAN_FAIR)
+        print(f"Fairs - APPL: {fair_appl}, ORNG: {fair_orng}")
 
-    print(f"Fairs - APPL: {fair_appl}, ORNG: {fair_orng}")
+        # If ORNG is cheap relative to APPL, buy ORNG sell APPL
+        if prices['ORNG']['ask'] is not None and prices['APPL']['bid'] is not None:
+            deviation = fair_orng - prices['ORNG']['ask']
+            print(f"ORNG stat arb check: fair_orng={fair_orng}, ask={prices['ORNG']['ask']}, deviation={deviation}, threshold={STAT_THRESHOLD}")
+            if deviation > STAT_THRESHOLD:
+                if positions['ORNG'] < cfg.max_pos and positions['APPL'] > -cfg.max_pos:
+                    actions.append(('ORNG', 'BUY', prices['ORNG']['ask'], cfg.base_size))
+                    actions.append(('APPL', 'SELL', prices['APPL']['bid'], cfg.base_size))
+                    print("Executing stat arb: Buy ORNG, Sell APPL")
 
-    # If ORNG is cheap relative to APPL, buy ORNG sell APPL
-    if prices['ORNG']['ask'] is not None and prices['APPL']['bid'] is not None:
-        deviation = fair_orng - prices['ORNG']['ask']
-        print(f"ORNG stat arb check: fair_orng={fair_orng}, ask={prices['ORNG']['ask']}, deviation={deviation}, threshold={STAT_THRESHOLD}")
-        if deviation > STAT_THRESHOLD:
-            if positions['ORNG'] < cfg.max_pos and positions['APPL'] > -cfg.max_pos:
-                actions.append(('ORNG', 'BUY', prices['ORNG']['ask'], cfg.base_size))
-                actions.append(('APPL', 'SELL', prices['APPL']['bid'], cfg.base_size))
-                print("Executing stat arb: Buy ORNG, Sell APPL")
+        # If ORNG is expensive, sell ORNG buy APPL
+        if prices['ORNG']['bid'] is not None and prices['APPL']['ask'] is not None:
+            deviation = prices['ORNG']['bid'] - fair_orng
+            print(f"ORNG stat arb check: bid={prices['ORNG']['bid']}, fair_orng={fair_orng}, deviation={deviation}, threshold={STAT_THRESHOLD}")
+            if deviation > STAT_THRESHOLD:
+                if positions['ORNG'] > -cfg.max_pos and positions['APPL'] < cfg.max_pos:
+                    actions.append(('ORNG', 'SELL', prices['ORNG']['bid'], cfg.base_size))
+                    actions.append(('APPL', 'BUY', prices['APPL']['ask'], cfg.base_size))
+                    print("Executing stat arb: Sell ORNG, Buy APPL")
 
-    # If ORNG is expensive, sell ORNG buy APPL
-    if prices['ORNG']['bid'] is not None and prices['APPL']['ask'] is not None:
-        deviation = prices['ORNG']['bid'] - fair_orng
-        print(f"ORNG stat arb check: bid={prices['ORNG']['bid']}, fair_orng={fair_orng}, deviation={deviation}, threshold={STAT_THRESHOLD}")
-        if deviation > STAT_THRESHOLD:
-            if positions['ORNG'] > -cfg.max_pos and positions['APPL'] < cfg.max_pos:
-                actions.append(('ORNG', 'SELL', prices['ORNG']['bid'], cfg.base_size))
-                actions.append(('APPL', 'BUY', prices['APPL']['ask'], cfg.base_size))
-                print("Executing stat arb: Sell ORNG, Buy APPL")
+        # Similarly for APPL
+        if prices['APPL']['ask'] is not None and prices['ORNG']['bid'] is not None:
+            deviation = fair_appl - prices['APPL']['ask']
+            print(f"APPL stat arb check: fair_appl={fair_appl}, ask={prices['APPL']['ask']}, deviation={deviation}, threshold={STAT_THRESHOLD}")
+            if deviation > STAT_THRESHOLD:
+                if positions['APPL'] < cfg.max_pos and positions['ORNG'] > -cfg.max_pos:
+                    actions.append(('APPL', 'BUY', prices['APPL']['ask'], cfg.base_size))
+                    actions.append(('ORNG', 'SELL', prices['ORNG']['bid'], cfg.base_size))
+                    print("Executing stat arb: Buy APPL, Sell ORNG")
 
-    # Similarly for APPL
-    if prices['APPL']['ask'] is not None and prices['ORNG']['bid'] is not None:
-        deviation = fair_appl - prices['APPL']['ask']
-        print(f"APPL stat arb check: fair_appl={fair_appl}, ask={prices['APPL']['ask']}, deviation={deviation}, threshold={STAT_THRESHOLD}")
-        if deviation > STAT_THRESHOLD:
-            if positions['APPL'] < cfg.max_pos and positions['ORNG'] > -cfg.max_pos:
-                actions.append(('APPL', 'BUY', prices['APPL']['ask'], cfg.base_size))
-                actions.append(('ORNG', 'SELL', prices['ORNG']['bid'], cfg.base_size))
-                print("Executing stat arb: Buy APPL, Sell ORNG")
-
-    if prices['APPL']['bid'] is not None and prices['ORNG']['ask'] is not None:
-        deviation = prices['APPL']['bid'] - fair_appl
-        print(f"APPL stat arb check: bid={prices['APPL']['bid']}, fair_appl={fair_appl}, deviation={deviation}, threshold={STAT_THRESHOLD}")
-        if deviation > STAT_THRESHOLD:
-            if positions['APPL'] > -cfg.max_pos and positions['ORNG'] < cfg.max_pos:
-                actions.append(('APPL', 'SELL', prices['APPL']['bid'], cfg.base_size))
-                actions.append(('ORNG', 'BUY', prices['ORNG']['ask'], cfg.base_size))
-                print("Executing stat arb: Sell APPL, Buy ORNG")
+        if prices['APPL']['bid'] is not None and prices['ORNG']['ask'] is not None:
+            deviation = prices['APPL']['bid'] - fair_appl
+            print(f"APPL stat arb check: bid={prices['APPL']['bid']}, fair_appl={fair_appl}, deviation={deviation}, threshold={STAT_THRESHOLD}")
+            if deviation > STAT_THRESHOLD:
+                if positions['APPL'] > -cfg.max_pos and positions['ORNG'] < cfg.max_pos:
+                    actions.append(('APPL', 'SELL', prices['APPL']['bid'], cfg.base_size))
+                    actions.append(('ORNG', 'BUY', prices['ORNG']['ask'], cfg.base_size))
+                    print("Executing stat arb: Sell APPL, Buy ORNG")
 
     print(f"Actions computed: {len(actions)}")
     return actions
@@ -190,15 +195,16 @@ def execute_actions(actions: List[Tuple[str, str, Optional[float], int]]) -> Non
 def step(cfg: ArbConfig) -> None:
     if get_status() not in (None, 'ACTIVE', 'RUNNING'):
         return
-    # Cancel all open orders to avoid conflicts
-    for ticker in cfg.tickers:
-        try:
-            cancel_all_orders(ticker)
-        except Exception as e:
-            print(f"Error canceling orders for {ticker}: {e}")
+    # Only cancel if actions are pending or positions need adjustment (reduce jitter)
     snap = observe(cfg)
     actions = compute_actions(snap, cfg)
-    execute_actions(actions)
+    if actions:  # Only cancel and execute if there are actions
+        for ticker in cfg.tickers:
+            try:
+                cancel_all_orders(ticker)
+            except Exception as e:
+                print(f"Error canceling orders for {ticker}: {e}")
+        execute_actions(actions)
 
 def main(cfg: Optional[ArbConfig] = None) -> None:
     cfg = cfg or ArbConfig()
