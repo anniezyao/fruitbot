@@ -18,16 +18,16 @@ from utils import (
 TICK = 0.01
 THRESHOLD = 0.01  # Lowered threshold for arbitrage to increase frequency
 STAT_THRESHOLD = 0.1  # Lowered threshold for stat arb to increase frequency
-MEAN_FAIR = 50.0
+MEAN_FAIR = 500.0  # Updated to 10x (sum of 10 uniforms [0,100], mean 50*10=500)
 CORR = 0.82
-FCALL_FAIR = 0.0  # FCALL settles to 10 * max(0, FRUIT - 1000), fair = 0 since FRUIT ~100 <1000
+FCALL_FAIR = 80.0  # Adjusted fair for FCALL
 
 @dataclass
 class ArbConfig:
     tickers: List[str] = field(default_factory=lambda: ['FRUIT', 'APPL', 'ORNG', 'FCALL'])
     loop_sleep_s: float = 0.25
     base_size: int = 100
-    max_pos: int = 1000
+    max_pos: int = 200000  # Increased to 200,000
 
 @dataclass
 class Snapshot:
@@ -107,21 +107,27 @@ def compute_actions(snap: Snapshot, cfg: ArbConfig) -> List[Tuple[str, str, Opti
             else:
                 print("Position limits prevent FRUIT arb actions")
 
-    # FCALL arbitrage: FCALL settles to 10 * max(0, FRUIT - 1000), fair ~0
+    # FCALL arbitrage: FCALL fair ~80, hedge 1 FCALL with 10 FRUIT
     fcall_bid = prices['FCALL']['bid']
     fcall_ask = prices['FCALL']['ask']
 
     print(f"FCALL prices: bid={fcall_bid}, ask={fcall_ask}, fair={FCALL_FAIR}")
 
     if fcall_bid is not None and fcall_bid > FCALL_FAIR + THRESHOLD:
-        if positions['FCALL'] > -cfg.max_pos:
-            print(f"Executing FCALL arb: Sell FCALL at {fcall_bid}, fair {FCALL_FAIR}")
-            actions.append(('FCALL', 'SELL', fcall_bid, cfg.base_size))
+        fcall_size = cfg.base_size
+        fruit_size = 10 * fcall_size
+        if positions['FCALL'] > -cfg.max_pos and positions['FRUIT'] > -cfg.max_pos and fruit_size <= cfg.max_pos:
+            print(f"Executing FCALL arb: Sell FCALL at {fcall_bid} and Buy FRUIT at {prices['FRUIT']['ask']}, fair {FCALL_FAIR}")
+            actions.append(('FCALL', 'SELL', fcall_bid, fcall_size))
+            actions.append(('FRUIT', 'BUY', prices['FRUIT']['ask'], fruit_size))  # Hedge by buying FRUIT
 
     if fcall_ask is not None and fcall_ask < FCALL_FAIR - THRESHOLD:
-        if positions['FCALL'] < cfg.max_pos:
-            print(f"Executing FCALL arb: Buy FCALL at {fcall_ask}, fair {FCALL_FAIR}")
-            actions.append(('FCALL', 'BUY', fcall_ask, cfg.base_size))
+        fcall_size = cfg.base_size
+        fruit_size = 10 * fcall_size
+        if positions['FCALL'] < cfg.max_pos and positions['FRUIT'] < cfg.max_pos and fruit_size <= cfg.max_pos:
+            print(f"Executing FCALL arb: Buy FCALL at {fcall_ask} and Sell FRUIT at {prices['FRUIT']['bid']}, fair {FCALL_FAIR}")
+            actions.append(('FCALL', 'BUY', fcall_ask, fcall_size))
+            actions.append(('FRUIT', 'SELL', prices['FRUIT']['bid'], fruit_size))  # Hedge by selling FRUIT
 
     # Statistical arbitrage on APPL and ORNG (limit orders)
     appl_mid = (prices['APPL']['bid'] + prices['APPL']['ask']) / 2 if prices['APPL']['bid'] and prices['APPL']['ask'] else MEAN_FAIR
