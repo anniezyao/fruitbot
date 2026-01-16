@@ -4,7 +4,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from config import *
-from requests import *
 
 from utils import (
     cancel_order,

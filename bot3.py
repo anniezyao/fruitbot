@@ -173,7 +173,6 @@ def compute_base_halfspread_ticks(best_bid: Optional[float], best_ask: Optional[
 
 def compute_desired_quotes(fair: float, snap: Snapshot, cfg: BotConfig) -> Tuple[Optional[Quote], Optional[Quote], Optional[str]]:
     best_bid, best_ask = _best_prices(snap.book)
-    # Removed fair clamping
     
     # Compute sizes with skew
     util = compute_inventory_skew(snap.position, cfg)
@@ -181,6 +180,12 @@ def compute_desired_quotes(fair: float, snap: Snapshot, cfg: BotConfig) -> Tuple
     ask_size = int(round(cfg.base_size * max(0.0, min(1.0, 1.0 + util))))
     bid_size = max(cfg.min_size, bid_size)
     ask_size = max(cfg.min_size, ask_size)
+
+    # If no orders at all, make the widest market
+    if best_bid is None and best_ask is None:
+        desired_bid = Quote(0.01, bid_size)
+        desired_ask = Quote(999.99, ask_size)
+        return desired_bid, desired_ask, None
 
     # Compute competitive quotes with edge to avoid pennying
     competitive_bid = best_bid + cfg.edge_ticks * TICK if best_bid is not None else None
@@ -195,29 +200,15 @@ def compute_desired_quotes(fair: float, snap: Snapshot, cfg: BotConfig) -> Tuple
     if competitive_bid is not None and competitive_ask is not None:
         quoted_spread = competitive_ask - competitive_bid
         captures = competitive_bid < fair < competitive_ask
-        if quoted_spread >= 2 * TICK and captures:
+        if quoted_spread >= 2 * TICK:
             desired_bid = Quote(competitive_bid, bid_size)
             desired_ask = Quote(competitive_ask, ask_size)
-        else:
-            if spread_ticks < 2 and not captures:
-                # Fill towards fair if spread too tight and cannot capture
-                if fair < competitive_bid:
-                    fill_side = 'SELL'
-                elif fair > competitive_ask:
-                    fill_side = 'BUY'
-            else:
-                # Tighten one side towards fair
-                center = (competitive_bid + competitive_ask) / 2
-                if fair < center:
-                    desired_bid = Quote(competitive_bid, bid_size)
-                else:
-                    desired_ask = Quote(competitive_ask, ask_size)
-    else:
-        # Tighten available side towards fair
-        if competitive_bid is not None and fair <= competitive_bid:
-            desired_bid = Quote(competitive_bid, bid_size)
-        elif competitive_ask is not None and fair >= competitive_ask:
-            desired_ask = Quote(competitive_ask, ask_size)
+        if spread_ticks < 2 and not captures:
+            # Fill towards fair if the market is tighter than 2 ticks and does not capture the fair
+            if fair < competitive_bid:
+                fill_side = 'SELL'
+            elif fair > competitive_ask:
+                fill_side = 'BUY'
 
     # Clamp prices to [0, 1000]
     if desired_bid:
@@ -283,6 +274,8 @@ def execute_plan(plan: QuotePlan, state: BotState, cfg: BotConfig) -> None:
     and finally places new orders. It updates the bot state's last action timestamps on success and logs exceptions."""
     now_ms = _now_ms()
 
+    print(f"Executing plan: Cancel {len(plan.cancel_ids)}, Place {len(plan.place)}, Replace {len(plan.replace)}, Market {len(plan.market_place)}")
+
     for oid in plan.cancel_ids:
         try:
             cancel_order(oid)
@@ -339,7 +332,10 @@ def step(state: BotState, cfg: BotConfig) -> Tuple[BotState, Optional[QuotePlan]
         return state, None, None
     fair = _read_fair_from_file()
     snap = observe(cfg)
+    best_bid, best_ask = _best_prices(snap.book)
     plan = make_plan(state, fair, snap, cfg)
+    desired_bid, desired_ask, fill_side = compute_desired_quotes(fair, snap, cfg)  # Recompute for logging
+    print(f"Debug: Fair={fair}, BestBid={best_bid}, BestAsk={best_ask}, Position={snap.position}, DesiredBid={desired_bid}, DesiredAsk={desired_ask}, FillSide={fill_side}")
     execute_plan(plan, state, cfg)
     return state, plan, fair
 
