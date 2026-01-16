@@ -170,49 +170,71 @@ def compute_base_halfspread_ticks(best_bid: Optional[float], best_ask: Optional[
     return max(half, 1)
 
 
-def compute_desired_quotes(fair: float, snap: Snapshot, cfg: BotConfig) -> Tuple[Optional[Quote], Optional[Quote]]:
+def compute_desired_quotes(fair: float, snap: Snapshot, cfg: BotConfig) -> Tuple[Optional[Quote], Optional[Quote], Optional[str]]:
     best_bid, best_ask = _best_prices(snap.book)
-    # Clamp fair within ±FAIR_CLAMP_TICKS of book mid
-    if best_bid is not None and best_ask is not None:
-        mid = (best_bid + best_ask) / 2
-        clamp_min = mid - FAIR_CLAMP_TICKS * TICK
-        clamp_max = mid + FAIR_CLAMP_TICKS * TICK
-        fair = max(clamp_min, min(clamp_max, fair))
-
-    half = compute_base_halfspread_ticks(best_bid, best_ask, cfg)
-    raw_bid = fair - (half + cfg.edge_ticks) * TICK
-    raw_ask = fair + (half + cfg.edge_ticks) * TICK
-
-    skew = compute_inventory_skew(snap.position, cfg)
-    bid_px = raw_bid - skew * cfg.skew_ticks * TICK
-    ask_px = raw_ask - skew * cfg.skew_ticks * TICK
-
-    bid_px = round_tick(bid_px)
-    ask_px = round_tick(ask_px)
-
-    # Clamp prices to [0, 1000]
-    bid_px = max(0.0, min(1000.0, bid_px))
-    ask_px = max(0.0, min(1000.0, ask_px))
-
+    
+    # Compute sizes with skew
     util = compute_inventory_skew(snap.position, cfg)
     bid_size = int(round(cfg.base_size * max(0.0, min(1.0, 1.0 - util))))
     ask_size = int(round(cfg.base_size * max(0.0, min(1.0, 1.0 + util))))
     bid_size = max(cfg.min_size, bid_size)
     ask_size = max(cfg.min_size, ask_size)
 
-    desired_bid = Quote(price=bid_px, qty=bid_size)
-    desired_ask = Quote(price=ask_px, qty=ask_size)
+    mid = (best_bid + best_ask) / 2 if best_bid is not None and best_ask is not None else fair
+    if abs(fair - mid) <= 1.0:
+        # Special case: don't take or fade, make the narrowest market that captures fair and contains best_bid and best_ask
+        if best_bid is not None and best_ask is not None:
+            bid_price = min(best_bid, fair)
+            ask_price = max(best_ask, fair)
+            desired_bid = Quote(bid_price, bid_size)
+            desired_ask = Quote(ask_price, ask_size)
+        else:
+            # If no book, perhaps normal, but since special, maybe None
+            desired_bid = None
+            desired_ask = None
+        fill_side = None
+    else:
+        # Normal logic
+        competitive_bid = best_bid + cfg.edge_ticks * TICK if best_bid is not None else None
+        competitive_ask = best_ask - cfg.edge_ticks * TICK if best_ask is not None else None
 
+        desired_bid = None
+        desired_ask = None
+        fill_side = None
+
+        spread_ticks = _ticks_diff(best_bid, best_ask) if best_bid is not None and best_ask is not None else 0
+
+        if competitive_bid is not None and competitive_ask is not None:
+            quoted_spread = competitive_ask - competitive_bid
+            captures = competitive_bid < fair < competitive_ask
+            if quoted_spread >= 2 * TICK and captures:
+                desired_bid = Quote(competitive_bid, bid_size)
+                desired_ask = Quote(competitive_ask, ask_size)
+            else:
+                if spread_ticks < 2 and not captures:
+                    # Fill towards fair if the market is tighter than 2 ticks and does not capture the fair
+                    if fair < competitive_bid:
+                        fill_side = 'SELL'
+                    elif fair > competitive_ask:
+                        fill_side = 'BUY'
+
+    # Clamp prices to [0, 1000]
+    if desired_bid:
+        desired_bid.price = max(0.0, min(1000.0, desired_bid.price))
+    if desired_ask:
+        desired_ask.price = max(0.0, min(1000.0, desired_ask.price))
+
+    # Apply position limits
     if snap.position >= cfg.max_pos:
         desired_bid = None
     if snap.position <= -cfg.max_pos:
         desired_ask = None
 
-    return desired_bid, desired_ask
+    return desired_bid, desired_ask, fill_side
 
 
 def make_plan(state: BotState, fair: float, snap: Snapshot, cfg: BotConfig) -> QuotePlan:
-    desired_bid, desired_ask = compute_desired_quotes(fair, snap, cfg)
+    desired_bid, desired_ask, fill_side = compute_desired_quotes(fair, snap, cfg)
     by_side = _normalize_open_orders(snap.open_orders)
     now_ms = _now_ms()
     plan = QuotePlan(desired_bid=desired_bid, desired_ask=desired_ask)
