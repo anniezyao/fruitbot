@@ -181,7 +181,7 @@ def compute_desired_quotes(fair: float, snap: Snapshot, cfg: BotConfig) -> Tuple
     ask_size = max(cfg.min_size, ask_size)
 
     mid = (best_bid + best_ask) / 2 if best_bid is not None and best_ask is not None else fair
-    if abs(fair - mid) <= 1.0:
+    if abs(fair - mid) <= 2.0:  # Changed from 1.0 to 2.0
         # Special case: don't take or fade, make the narrowest market that captures fair and contains best_bid and best_ask
         if best_bid is not None and best_ask is not None:
             bid_price = min(best_bid, fair)
