@@ -180,6 +180,20 @@ def compute_desired_quotes(fair: float, snap: Snapshot, cfg: BotConfig) -> Tuple
     bid_size = max(cfg.min_size, bid_size)
     ask_size = max(cfg.min_size, ask_size)
 
+    # Compute default skewed quotes (always quote unless overridden)
+    half = compute_base_halfspread_ticks(best_bid, best_ask, cfg)
+    raw_bid = fair - (half + cfg.edge_ticks) * TICK
+    raw_ask = fair + (half + cfg.edge_ticks) * TICK
+    bid_px = raw_bid - util * cfg.skew_ticks * TICK
+    ask_px = raw_ask - util * cfg.skew_ticks * TICK
+    bid_px = round_tick(bid_px)
+    ask_px = round_tick(ask_px)
+    bid_px = max(0.0, min(2000.0, bid_px))  # Clamp to [0, 2000] for safety
+    ask_px = max(0.0, min(2000.0, ask_px))
+    desired_bid = Quote(bid_px, bid_size)
+    desired_ask = Quote(ask_px, ask_size)
+    fill_side = None
+
     mid = (best_bid + best_ask) / 2 if best_bid is not None and best_ask is not None else fair
     if abs(fair - mid) <= 2.0:
         # Special case: don't take or fade, make the narrowest market that captures fair and contains best_bid and best_ask
@@ -188,18 +202,11 @@ def compute_desired_quotes(fair: float, snap: Snapshot, cfg: BotConfig) -> Tuple
             ask_price = round_tick(max(best_ask, fair))
             desired_bid = Quote(bid_price, bid_size)
             desired_ask = Quote(ask_price, ask_size)
-        else:
-            desired_bid = None
-            desired_ask = None
-        fill_side = None
+        # If book is missing, keep default skewed quotes (don't go dark)
     else:
-        # Normal logic
+        # Normal logic: try competitive, else keep default skewed quotes
         competitive_bid = round_tick(best_bid + cfg.edge_ticks * TICK) if best_bid is not None else None
         competitive_ask = round_tick(best_ask - cfg.edge_ticks * TICK) if best_ask is not None else None
-
-        desired_bid = None
-        desired_ask = None
-        fill_side = None
 
         spread_ticks = _ticks_diff(best_bid, best_ask) if best_bid is not None and best_ask is not None else 0
 
@@ -209,13 +216,13 @@ def compute_desired_quotes(fair: float, snap: Snapshot, cfg: BotConfig) -> Tuple
             if quoted_spread >= 2 * TICK and captures:
                 desired_bid = Quote(competitive_bid, bid_size)
                 desired_ask = Quote(competitive_ask, ask_size)
-            else:
-                if spread_ticks < 2 and not captures:
-                    # Fill towards fair if the market is tighter than 2 ticks and does not capture the fair
-                    if fair < competitive_bid:
-                        fill_side = 'SELL'
-                    elif fair > competitive_ask:
-                        fill_side = 'BUY'
+            # If not competitive, keep default skewed quotes
+            if spread_ticks < 2 and not captures:
+                # Fill towards fair if the market is tighter than 2 ticks and does not capture the fair
+                if fair < competitive_bid:
+                    fill_side = 'SELL'
+                elif fair > competitive_ask:
+                    fill_side = 'BUY'
 
     # Clamp prices to [0, 1000]
     if desired_bid:
