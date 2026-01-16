@@ -54,7 +54,7 @@ def observe(cfg: ArbConfig) -> Snapshot:
     open_orders = {ticker: get_open_orders(ticker) or [] for ticker in cfg.tickers}
     return Snapshot(tick=tick, positions=positions, books=books, open_orders=open_orders)
 
-def compute_actions(snap: Snapshot, cfg: ArbConfig) -> List[Tuple[str, str, float, int]]:
+def compute_actions(snap: Snapshot, cfg: ArbConfig) -> List[Tuple[str, str, Optional[float], int]]:
     actions = []
     books = snap.books
     positions = snap.positions
@@ -76,22 +76,22 @@ def compute_actions(snap: Snapshot, cfg: ArbConfig) -> List[Tuple[str, str, floa
     if fruit_bid is not None and appl_ask is not None and orng_ask is not None:
         synthetic_ask = appl_ask + orng_ask
         if fruit_bid > synthetic_ask + THRESHOLD:
-            # Sell FRUIT, buy APPL, buy ORNG
+            # Sell FRUIT, buy APPL, buy ORNG (market orders for arb)
             if positions['FRUIT'] > -cfg.max_pos and positions['APPL'] < cfg.max_pos and positions['ORNG'] < cfg.max_pos:
-                actions.append(('FRUIT', 'SELL', fruit_bid, cfg.base_size))
-                actions.append(('APPL', 'BUY', appl_ask, cfg.base_size))
-                actions.append(('ORNG', 'BUY', orng_ask, cfg.base_size))
+                actions.append(('FRUIT', 'SELL', None, cfg.base_size))  # Market sell
+                actions.append(('APPL', 'BUY', None, cfg.base_size))   # Market buy
+                actions.append(('ORNG', 'BUY', None, cfg.base_size))   # Market buy
 
     if fruit_ask is not None and appl_bid is not None and orng_bid is not None:
         synthetic_bid = appl_bid + orng_bid
         if fruit_ask < synthetic_bid - THRESHOLD:
-            # Buy FRUIT, sell APPL, sell ORNG
+            # Buy FRUIT, sell APPL, sell ORNG (market orders for arb)
             if positions['FRUIT'] < cfg.max_pos and positions['APPL'] > -cfg.max_pos and positions['ORNG'] > -cfg.max_pos:
-                actions.append(('FRUIT', 'BUY', fruit_ask, cfg.base_size))
-                actions.append(('APPL', 'SELL', appl_bid, cfg.base_size))
-                actions.append(('ORNG', 'SELL', orng_bid, cfg.base_size))
+                actions.append(('FRUIT', 'BUY', None, cfg.base_size))  # Market buy
+                actions.append(('APPL', 'SELL', None, cfg.base_size))  # Market sell
+                actions.append(('ORNG', 'SELL', None, cfg.base_size))  # Market sell
 
-    # Statistical arbitrage on APPL and ORNG
+    # Statistical arbitrage on APPL and ORNG (limit orders)
     appl_mid = (prices['APPL']['bid'] + prices['APPL']['ask']) / 2 if prices['APPL']['bid'] and prices['APPL']['ask'] else MEAN_FAIR
     orng_mid = (prices['ORNG']['bid'] + prices['ORNG']['ask']) / 2 if prices['ORNG']['bid'] and prices['ORNG']['ask'] else MEAN_FAIR
 
@@ -127,10 +127,13 @@ def compute_actions(snap: Snapshot, cfg: ArbConfig) -> List[Tuple[str, str, floa
 
     return actions
 
-def execute_actions(actions: List[Tuple[str, str, float, int]]) -> None:
+def execute_actions(actions: List[Tuple[str, str, Optional[float], int]]) -> None:
     for ticker, side, price, qty in actions:
         try:
-            send_order(ticker, side, price, qty)
+            if price is None:
+                send_order(ticker, side, None, qty)  # Market order
+            else:
+                send_order(ticker, side, price, qty)  # Limit order
         except Exception as e:
             print(f"Error sending order for {ticker} {side} {price} {qty}: {e}")
 
