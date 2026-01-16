@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from config import *
+from requests import *
 
 from utils import (
     cancel_order,
+    cancel_all_orders,
     get_book,
     get_open_orders,
     get_position,
@@ -137,6 +138,12 @@ def execute_actions(actions: List[Tuple[str, str, float, int]]) -> None:
 def step(cfg: ArbConfig) -> None:
     if get_status() not in (None, 'ACTIVE', 'RUNNING'):
         return
+    # Cancel all open orders to avoid conflicts
+    for ticker in cfg.tickers:
+        try:
+            cancel_all_orders(ticker)
+        except Exception as e:
+            print(f"Error canceling orders for {ticker}: {e}")
     snap = observe(cfg)
     actions = compute_actions(snap, cfg)
     execute_actions(actions)

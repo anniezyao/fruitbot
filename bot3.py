@@ -182,9 +182,9 @@ def compute_desired_quotes(fair: float, snap: Snapshot, cfg: BotConfig) -> Tuple
     bid_size = max(cfg.min_size, bid_size)
     ask_size = max(cfg.min_size, ask_size)
 
-    # Compute competitive quotes
-    competitive_bid = best_bid + TICK if best_bid is not None else None
-    competitive_ask = best_ask - TICK if best_ask is not None else None
+    # Compute competitive quotes with edge to avoid pennying
+    competitive_bid = best_bid + cfg.edge_ticks * TICK if best_bid is not None else None
+    competitive_ask = best_ask - cfg.edge_ticks * TICK if best_ask is not None else None
 
     desired_bid = None
     desired_ask = None
@@ -218,6 +218,12 @@ def compute_desired_quotes(fair: float, snap: Snapshot, cfg: BotConfig) -> Tuple
             desired_bid = Quote(competitive_bid, bid_size)
         elif competitive_ask is not None and fair >= competitive_ask:
             desired_ask = Quote(competitive_ask, ask_size)
+
+    # Clamp prices to [0, 1000]
+    if desired_bid:
+        desired_bid.price = max(0.0, min(1000.0, desired_bid.price))
+    if desired_ask:
+        desired_ask.price = max(0.0, min(1000.0, desired_ask.price))
 
     # Apply position limits
     if snap.position >= cfg.max_pos:
@@ -289,14 +295,18 @@ def execute_plan(plan: QuotePlan, state: BotState, cfg: BotConfig) -> None:
         except Exception as e:
             print(f"Error canceling order {oid} for replace: {e}")
         try:
-            send_order(cfg.ticker, side, q.price, q.qty)
+            # Clamp price
+            clamped_price = max(0.0, min(1000.0, q.price))
+            send_order(cfg.ticker, side, clamped_price, q.qty)
             state.last_action_ms[side] = now_ms
         except Exception as e:
             print(f"Error placing order for replace: {e}")
 
     for side, q in plan.place:
         try:
-            send_order(cfg.ticker, side, q.price, q.qty)
+            # Clamp price
+            clamped_price = max(0.0, min(1000.0, q.price))
+            send_order(cfg.ticker, side, clamped_price, q.qty)
             state.last_action_ms[side] = now_ms
         except Exception as e:
             print(f"Error placing order: {e}")
@@ -310,6 +320,8 @@ def execute_plan(plan: QuotePlan, state: BotState, cfg: BotConfig) -> None:
         elif side == 'SELL' and best_bid is not None:
             price = best_bid
         if price is not None:
+            # Clamp price
+            price = max(0.0, min(1000.0, price))
             try:
                 send_order(cfg.ticker, side, price, qty)
                 state.last_action_ms[side] = now_ms
