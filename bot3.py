@@ -27,7 +27,6 @@ THEO_PATH = "theo"
 
 def _read_fair_from_file(path: str = THEO_PATH) -> float:
     """Read fair value from a plain-text file.
-
     Assumes theo is always correct; no fallback needed.
     """
     try:
@@ -179,7 +178,7 @@ def compute_desired_quotes(fair: float, snap: Snapshot, cfg: BotConfig) -> Tuple
         clamp_min = mid - FAIR_CLAMP_TICKS * TICK
         clamp_max = mid + FAIR_CLAMP_TICKS * TICK
         fair = max(clamp_min, min(clamp_max, fair))
-    
+
     half = compute_base_halfspread_ticks(best_bid, best_ask, cfg)
     raw_bid = fair - (half + cfg.edge_ticks) * TICK
     raw_ask = fair + (half + cfg.edge_ticks) * TICK
@@ -258,8 +257,6 @@ def execute_plan(plan: QuotePlan, state: BotState, cfg: BotConfig) -> None:
     and finally places new orders. It updates the bot state's last action timestamps on success and logs exceptions."""
     now_ms = _now_ms()
 
-    print(f"Executing plan: Cancel {len(plan.cancel_ids)}, Place {len(plan.place)}, Replace {len(plan.replace)}, Market {len(plan.market_place)}")
-
     for oid in plan.cancel_ids:
         try:
             cancel_order(oid)
@@ -272,18 +269,14 @@ def execute_plan(plan: QuotePlan, state: BotState, cfg: BotConfig) -> None:
         except Exception as e:
             print(f"Error canceling order {oid} for replace: {e}")
         try:
-            # Clamp price
-            clamped_price = max(0.0, min(1000.0, q.price))
-            send_order(cfg.ticker, side, clamped_price, q.qty)
+            send_order(cfg.ticker, side, q.price, q.qty)
             state.last_action_ms[side] = now_ms
         except Exception as e:
             print(f"Error placing order for replace: {e}")
 
     for side, q in plan.place:
         try:
-            # Clamp price
-            clamped_price = max(0.0, min(1000.0, q.price))
-            send_order(cfg.ticker, side, clamped_price, q.qty)
+            send_order(cfg.ticker, side, q.price, q.qty)
             state.last_action_ms[side] = now_ms
         except Exception as e:
             print(f"Error placing order: {e}")
@@ -299,10 +292,7 @@ def step(state: BotState, cfg: BotConfig) -> Tuple[BotState, Optional[QuotePlan]
         return state, None, None
     fair = _read_fair_from_file()
     snap = observe(cfg)
-    best_bid, best_ask = _best_prices(snap.book)
     plan = make_plan(state, fair, snap, cfg)
-    desired_bid, desired_ask, fill_side = compute_desired_quotes(fair, snap, cfg)  # Recompute for logging
-    print(f"Debug: Fair={fair}, BestBid={best_bid}, BestAsk={best_ask}, Position={snap.position}, DesiredBid={desired_bid}, DesiredAsk={desired_ask}, FillSide={fill_side}")
     execute_plan(plan, state, cfg)
     return state, plan, fair
 
